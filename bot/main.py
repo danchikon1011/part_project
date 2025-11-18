@@ -32,6 +32,7 @@ from .services import (
     list_primary_units,
     list_tasks_for_period,
     list_users_in_primary_unit,
+    seed_municipalities,
     task_is_available_for_municipality,
     task_stats,
 )
@@ -77,6 +78,15 @@ def municipality_task_keyboard(task: Task) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def municipality_choice_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for name in settings.default_municipalities:
+        encoded = quote_plus(name)
+        builder.button(text=name, callback_data=f"muni:{encoded}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 class TaskForm(StatesGroup):
     title = State()
     description = State()
@@ -85,9 +95,25 @@ class TaskForm(StatesGroup):
     municipalities = State()
 
 
+class RoleForm(StatesGroup):
+    municipality = State()
+
+
 async def get_current_user(session: AsyncSession, telegram_id: int) -> Optional[User]:
     result = await session.execute(select(User).where(User.telegram_id == telegram_id))
     return result.scalars().first()
+
+
+async def set_municipality_role(telegram_id: int, full_name: str, municipality_name: str) -> None:
+    async with SessionLocal() as session:
+        municipality = await get_or_create_municipality(session, municipality_name)
+        await get_or_create_user(
+            session,
+            telegram_id,
+            full_name,
+            Role.MUNICIPALITY,
+            municipality=municipality,
+        )
 
 
 async def cmd_start(message: Message, state: FSMContext) -> None:
@@ -129,15 +155,7 @@ async def process_municipality_name(message: Message, state: FSMContext) -> None
         await message.answer("Сначала выберите роль /set_role")
         return
 
-    async with SessionLocal() as session:
-        municipality = await get_or_create_municipality(session, message.text.strip())
-        await get_or_create_user(
-            session,
-            message.from_user.id,
-            message.from_user.full_name,
-            Role.MUNICIPALITY,
-            municipality=municipality,
-        )
+    await set_municipality_role(message.from_user.id, message.from_user.full_name, message.text.strip())
     await state.clear()
     await message.answer(
         "Роль 'municipality' сохранена. Используйте кнопки меню для просмотра задач.",
@@ -294,8 +312,11 @@ async def change_status(callback: CallbackQuery, task_id: int) -> None:
 async def set_role_from_callback(callback: CallbackQuery, role: Role, state: FSMContext) -> None:
     if role == Role.MUNICIPALITY:
         await state.update_data(target_role=role)
-        await state.set_state(TaskForm.municipalities)
-        await callback.message.answer("Введите название вашего муниципалитета:")
+        await state.set_state(RoleForm.municipality)
+        await callback.message.answer(
+            "Выберите ваш муниципалитет из списка или введите название вручную:",
+            reply_markup=municipality_choice_keyboard(),
+        )
         await callback.answer()
         return
 
@@ -382,6 +403,19 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext) -> None:
         await set_role_from_callback(callback, role, state)
         return
 
+    if callback.data.startswith("muni:"):
+        name = unquote_plus(callback.data.split(":", 1)[1])
+        await state.update_data(target_role=Role.MUNICIPALITY)
+        await state.set_state(RoleForm.municipality)
+        await set_municipality_role(callback.from_user.id, callback.from_user.full_name, name)
+        await state.clear()
+        await callback.message.answer(
+            "Роль 'municipality' сохранена. Используйте кнопки меню для просмотра задач.",
+            reply_markup=main_menu_keyboard(Role.MUNICIPALITY),
+        )
+        await callback.answer()
+        return
+
     if callback.data.startswith("stats:"):
         task_id = int(callback.data.split(":")[1])
         await show_stats(callback, task_id)
@@ -408,6 +442,8 @@ async def handle_callback(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def main() -> None:
     await init_db()
+    async with SessionLocal() as session:
+        await seed_municipalities(session, settings.default_municipalities)
     bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
     dp = Dispatcher()
 
@@ -424,7 +460,7 @@ async def main() -> None:
     dp.message.register(task_description, TaskForm.description)
     dp.message.register(task_datetime, TaskForm.starts_at)
     dp.message.register(task_location, TaskForm.location)
-    dp.message.register(process_municipality_name, TaskForm.municipalities, F.text)
+    dp.message.register(process_municipality_name, RoleForm.municipality, F.text)
     dp.message.register(finalize_task, TaskForm.municipalities)
 
     dp.callback_query.register(handle_callback)

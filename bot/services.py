@@ -22,6 +22,13 @@ async def get_or_create_municipality(session: AsyncSession, name: str) -> Munici
     return municipality
 
 
+async def seed_municipalities(session: AsyncSession, names: Iterable[str]) -> None:
+    """Ensure test municipalities exist."""
+
+    for name in names:
+        await get_or_create_municipality(session, name)
+
+
 async def get_or_create_user(
     session: AsyncSession,
     telegram_id: int,
