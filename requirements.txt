@@ -1,0 +1,5 @@
+aiosqlite
+aiogram==3.6.0
+SQLAlchemy==2.0.30
+python-dotenv
+qrcode[pil]
